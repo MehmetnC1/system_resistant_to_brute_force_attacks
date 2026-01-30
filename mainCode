@@ -1,0 +1,256 @@
+#include <LiquidCrystal_I2C.h>
+#include <IRremote.h>
+#include <EEPROM.h>
+#include <Wire.h>
+
+// Pin tanımlamaları
+#define IR_RECEIVER_PIN 11
+#define RELAY_PIN 7
+#define RED_LED 5
+#define GREEN_LED 6
+#define BUZZER_PIN 4
+#define RESET_BUTTON 2
+
+// Güvenlik ayarları
+#define MAX_ATTEMPTS 3
+#define LOCK_TIME 1800000 // 30 dakika (milisaniye)
+#define INPUT_TIMEOUT 15000 // 15 saniye
+#define PASSWORD_LENGTH 4
+
+// Değişkenler
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+IRrecv irrecv(IR_RECEIVER_PIN);
+decode_results results;
+
+byte correctPassword[PASSWORD_LENGTH] = {1, 2, 3, 4}; // Varsayılan şifre
+byte enteredPassword[PASSWORD_LENGTH];
+int attemptCount = 0;
+unsigned long lockUntil = 0;
+bool isLocked = false;
+int passwordPosition = 0;
+unsigned long inputStartTime = 0;
+
+void setup() {
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RESET_BUTTON, INPUT_PULLUP);
+  
+  digitalWrite(RELAY_PIN, LOW); // Kilitli başlangıç
+  
+  lcd.init();
+  lcd.backlight();
+  irrecv.enableIRIn();
+  
+  EEPROM.get(0, correctPassword); // Hafızadan şifreyi oku
+  
+  displayWelcomeMessage();
+}
+
+void loop() {
+  if (isLocked) {
+    checkLockStatus();
+    return;
+  }
+  
+  if (passwordPosition == 0) {
+    displayEnterPassword();
+    inputStartTime = millis();
+  }
+  
+  checkInputTimeout();
+  processIRInput();
+}
+
+void processIRInput() {
+  if (irrecv.decode(&results)) {
+    char key = translateIR(results.value);
+    
+    if (key >= '0' && key <= '9') {
+      if (passwordPosition < PASSWORD_LENGTH) {
+        enteredPassword[passwordPosition] = key - '0';
+        passwordPosition++;
+        displayAsterisk();
+        beepShort();
+      }
+    }
+    else if (key == 'E') { // Enter tuşu
+      checkPassword();
+    }
+    else if (key == 'C') { // Clear tuşu
+      clearPassword();
+    }
+    
+    irrecv.resume();
+  }
+}
+
+void checkPassword() {
+  bool correct = true;
+  
+  for (int i = 0; i < PASSWORD_LENGTH; i++) {
+    if (enteredPassword[i] != correctPassword[i]) {
+      correct = false;
+      break;
+    }
+  }
+  
+  if (correct) {
+    unlockDoor();
+    attemptCount = 0; // Başarılı girişte sayaç sıfırlanır
+  } else {
+    failedAttempt();
+  }
+  
+  clearPassword();
+}
+
+void failedAttempt() {
+  attemptCount++;
+  beepError();
+  
+  lcd.clear();
+  lcd.print("Hatali Sifre!");
+  lcd.setCursor(0, 1);
+  lcd.print("Kalan: ");
+  lcd.print(MAX_ATTEMPTS - attemptCount);
+  
+  digitalWrite(RED_LED, HIGH);
+  delay(2000);
+  digitalWrite(RED_LED, LOW);
+  
+  if (attemptCount >= MAX_ATTEMPTS) {
+    lockSystem();
+  }
+}
+
+void lockSystem() {
+  isLocked = true;
+  lockUntil = millis() + LOCK_TIME;
+  
+  lcd.clear();
+  lcd.print("SISTEM KILITLI!");
+  lcd.setCursor(0, 1);
+  lcd.print("30 dk bekleyin");
+  
+  digitalWrite(RED_LED, HIGH);
+  tone(BUZZER_PIN, 1000, 1000);
+  
+  // EEPROM'a log yaz (opsiyonel)
+  writeSecurityLog();
+}
+
+void unlockDoor() {
+  lcd.clear();
+  lcd.print("Sifre Dogru!");
+  lcd.setCursor(0, 1);
+  lcd.print("Kapi Aciliyor...");
+  
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(RELAY_PIN, HIGH); // Kilit açıldı
+  
+  beepSuccess();
+  delay(3000);
+  
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RELAY_PIN, LOW); // Tekrar kitle
+}
+
+void checkInputTimeout() {
+  if (passwordPosition > 0 && 
+      (millis() - inputStartTime) > INPUT_TIMEOUT) {
+    lcd.clear();
+    lcd.print("Zaman Asimi!");
+    delay(2000);
+    clearPassword();
+  }
+}
+
+void checkLockStatus() {
+  if (millis() >= lockUntil) {
+    isLocked = false;
+    attemptCount = 0;
+    
+    lcd.clear();
+    lcd.print("Kilit Acildi");
+    lcd.setCursor(0, 1);
+    lcd.print("Tekrar Deneyin");
+    
+    digitalWrite(RED_LED, LOW);
+    delay(2000);
+  } else {
+    // Geri sayım göster
+    unsigned long remaining = (lockUntil - millis()) / 1000;
+    lcd.clear();
+    lcd.print("Kilitli: ");
+    lcd.print(remaining / 60);
+    lcd.print(" dk ");
+    lcd.print(remaining % 60);
+    lcd.print(" sn");
+  }
+}
+
+// Yardımcı fonksiyonlar
+void displayWelcomeMessage() {
+  lcd.clear();
+  lcd.print(" Guvenli Kilit ");
+  lcd.setCursor(0, 1);
+  lcd.print("  Sifre Girin  ");
+}
+
+void displayEnterPassword() {
+  lcd.clear();
+  lcd.print("Sifre: ____");
+  lcd.setCursor(7, 0);
+}
+
+void displayAsterisk() {
+  lcd.setCursor(7 + passwordPosition - 1, 0);
+  lcd.print("*");
+}
+
+void clearPassword() {
+  passwordPosition = 0;
+  displayEnterPassword();
+}
+
+void beepShort() {
+  tone(BUZZER_PIN, 1000, 100);
+}
+
+void beepSuccess() {
+  tone(BUZZER_PIN, 1500, 300);
+  delay(100);
+  tone(BUZZER_PIN, 2000, 300);
+}
+
+void beepError() {
+  tone(BUZZER_PIN, 300, 1000);
+}
+
+char translateIR(long hexValue) {
+  // IR kumanda tuş değerlerini çevir
+  switch(hexValue) {
+    case 0xFF6897: return '0';
+    case 0xFF30CF: return '1';
+    case 0xFF18E7: return '2';
+    case 0xFF7A85: return '3';
+    case 0xFF10EF: return '4';
+    case 0xFF38C7: return '5';
+    case 0xFF5AA5: return '6';
+    case 0xFF42BD: return '7';
+    case 0xFF4AB5: return '8';
+    case 0xFF52AD: return '9';
+    case 0xFFA25D: return 'C'; // Clear
+    case 0xFF02FD: return 'E'; // Enter/OK
+    default: return 'X'; // Geçersiz
+  }
+}
+
+void writeSecurityLog() {
+  // Güvenlik olaylarını EEPROM'a kaydet
+  int logAddress = 10;
+  byte logEntry = 1; // 1 = Kilitlenme olayı
+  EEPROM.write(logAddress, logEntry);
+}
